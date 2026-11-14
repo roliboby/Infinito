@@ -1,0 +1,142 @@
+name: Compilar Shattered PD Infinito APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar Shattered Pixel Dungeon 4.0.2
+        uses: actions/checkout@v4
+        with:
+          repository: 00-Evan/shattered-pixel-dungeon
+          ref: v4.0.2
+          path: juego
+          persist-credentials: false
+
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Preparar Android
+        uses: android-actions/setup-android@v3
+
+      - name: SDK Android 36
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Aplicar modificaciones
+        run: |
+          python3 - <<'PY'
+          import argparse
+          from pathlib import Path
+          import sys
+
+          JAVA = 'core/src/main/java/com/shatteredpixel/shatteredpixeldungeon'
+
+          def replace_once(src: str, old: str, new: str, filepath: str) -> str:
+              n = src.count(old)
+              if n != 1:
+                  raise ValueError(f'{filepath}: se esperaba 1 coincidencia, hay {n}: {old[:65]!r}.')
+              return src.replace(old, new, 1)
+
+          def apply(root: Path):
+              root = root.resolve()
+              base = root / 'build.gradle'
+              if not base.exists() or "appVersionName = '4.0.2'" not in base.read_text(encoding='utf-8'):
+                  raise ValueError('Se necesita el código fuente original v4.0.2.')
+              edits = {}
+
+              def prepare(rel, changes):
+                  path = root / rel
+                  before = path.read_text(encoding='utf-8')
+                  updated = before
+                  for old, new in changes:
+                      updated = replace_once(updated, old, new, rel)
+                  edits[path] = updated
+
+              prepare('build.gradle', [
+                  ("appName = 'Shattered Pixel Dungeon'", "appName = 'Shattered PD Infinito'"),
+                  ("appPackageName = 'com.shatteredpixel.shatteredpixeldungeon'", "appPackageName = 'com.custom.shatteredpdinfinito'"),
+                  ("appVersionName = '4.0.2'", "appVersionName = '4.0.2-MOD'"),
+              ])
+
+              prepare(f'{JAVA}/Dungeon.java', [
+                  ('import com.shatteredpixel.shatteredpixeldungeon.items.scrolls.Scroll;\n',
+                   'import com.shatteredpixel.shatteredpixeldungeon.items.scrolls.Scroll;\n'
+                   'import com.shatteredpixel.shatteredpixeldungeon.items.scrolls.ScrollOfIdentify;\n'
+                   'import com.shatteredpixel.shatteredpixeldungeon.items.scrolls.ScrollOfUpgrade;\n'),
+                  ('\t\tgold = 0;\n\t\tenergy = 0;',
+                   '\t\tgold = 100000000;\n\t\tenergy = 100000000;'),
+                  ('\t\tGamesInProgress.selectedClass.initHero( hero );',
+                   '\t\tGamesInProgress.selectedClass.initHero( hero );\n'
+                   '\t\tnew ScrollOfIdentify().identify().collect();\n'
+                   '\t\tnew ScrollOfUpgrade().identify().collect();'),
+                  ('\t\tgold = bundle.getInt( GOLD );\n\t\tenergy = bundle.getInt( ENERGY );',
+                   '\t\tgold = 100000000;\n\t\tenergy = 100000000;'),
+              ])
+
+              prepare(f'{JAVA}/items/Item.java', [
+                  ('import com.shatteredpixel.shatteredpixeldungeon.items.bags.Bag;\n',
+                   'import com.shatteredpixel.shatteredpixeldungeon.items.bags.Bag;\n'
+                   'import com.shatteredpixel.shatteredpixeldungeon.items.scrolls.ScrollOfIdentify;\n'
+                   'import com.shatteredpixel.shatteredpixeldungeon.items.scrolls.ScrollOfUpgrade;\n'),
+                  ('\tpublic final Item detach( Bag container ) {\n',
+                   '\tpublic final Item detach( Bag container ) {\n'
+                   '\t\tif (this instanceof ScrollOfIdentify || this instanceof ScrollOfUpgrade) {\n'
+                   '\t\t\tItem copy = duplicate();\n'
+                   '\t\t\tif (copy != null) {\n'
+                   '\t\t\t\tcopy.quantity(1);\n'
+                   '\t\t\t\treturn copy;\n'
+                   '\t\t\t}\n'
+                   '\t\t}\n'),
+              ])
+
+              prepare(f'{JAVA}/scenes/AlchemyScene.java', [
+                  ('\t\t\tint availableEnergy = Dungeon.energy;',
+                   '\t\t\tint availableEnergy = 100000000;'),
+                  ('\t\tif (recipe != null){\n\t\t\tint cost = recipe.cost(ingredients);\n'
+                   '\t\t\tif (toolkit != null){\n\t\t\t\tcost = toolkit.consumeEnergy(cost);\n\t\t\t}',
+                   '\t\tif (recipe != null){\n'
+                   '\t\t\tint cost = 0;'),
+              ])
+
+              prepare(f'{JAVA}/windows/WndTradeItem.java', [
+                  ('\t\tbtnBuy.enable( price <= Dungeon.gold );',
+                   '\t\tbtnBuy.enable( true );'),
+                  ('\t\tDungeon.gold -= price;',
+                   '\t\t// Compras sin consumir oro.'),
+              ])
+
+              for path, content in edits.items():
+                  path.write_text(content, encoding='utf-8')
+                  print('MODIFICADO:', path.relative_to(root))
+
+          apply(Path('juego'))
+          PY
+
+      - name: Compilar APK
+        working-directory: juego
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :android:assembleDebug --no-daemon --stacktrace
+
+      - name: Preparar el APK descargable
+        run: |
+          ls -lah juego/android/build/outputs/apk/debug/
+          cp juego/android/build/outputs/apk/debug/*.apk ShatteredPD-Infinito-v4.0.2.apk
+
+      - name: Publicar APK en Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: mod-v4.0.2
+          name: Shattered PD Infinito v4.0.2
+          body: 'MOD personal de Shattered Pixel Dungeon (GPLv3) con oro, energía y pergaminos ilimitados. Compilación de prueba sin verificar.'
+          files: ShatteredPD-Infinito-v4.0.2.apk
+          fail_on_unmatched_files: true
+          
